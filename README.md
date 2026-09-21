@@ -81,14 +81,14 @@ npm start
 
 1. 公式LINE Chrome拡張機能（ID: `ophjlpahpchlmihnnnihgmmeilfjmjjc`）をダウンロード
 2. 中の `main.js` などをパッチ
-   - `location.origin` などを拡張機能のオリジンに仮装
-   - APIエンドポイントを自前プロキシ経由に変更
+   - `location.origin` などを拡張機能のオリジンに偽装
+   - APIホストを same-origin にし、path は `/api/...` のまま維持（X-Hmac用）
 3. Node.js (Hono) で静的ファイル配信 + プロキシサーバーを起動
 
-プロキシしている主なエンドポイント：
+プロキシしている主なパス：
 
-- `/_proxy/R4` → `https://ci.line-apps.com/R4`
-- `/_proxy/CHROME_GW/*` → `https://line-chrome-gw.line-apps.com/*`
+- `/api/*` → `https://line-chrome-gw.line-apps.com`
+- `/R4` → `https://ci.line-apps.com`
 
 ---
 
@@ -105,3 +105,24 @@ npm start
 - 本リポジトリのコード（プロキシサーバー部分など）はMITライセンスとします
 - 公式LINE拡張機能のコード自体はLINEヤフー株式会社の著作物です
 - 本プロジェクトは教育・研究目的のサンプルです
+
+---
+
+## BANリスクを下げるための実装メモ
+
+このリポジトリは次の対策を入れています（**BANを防ぐ保証はありません**）。
+
+- リクエスト path を公式と同じ `/api/...` のまま維持（X-Hmac 用）
+- `Origin` / `User-Agent` / `x-line-chrome-version` を公式拡張に近づける
+- プロキシ側の簡易レート制限（1 IP あたり毎分上限）
+- トークンや本文をログに出さない
+- Cookie をWebオリジンから上流へ転送しない
+
+### 利用上の注意（重要）
+
+1. **メインの大切なアカウントでは使わない**
+2. 自動化・大量送信・BOT用途はしない
+3. 通常の人間の操作頻度を超えない
+4. 公式PCアプリや公式Chrome拡張がある場合はそちらを優先する
+
+それでも非公式クライアントである限り、制限やBANの可能性は残ります。

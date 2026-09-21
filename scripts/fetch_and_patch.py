@@ -55,6 +55,20 @@ def extract_crx(crx_data: bytes, dest: str):
     os.remove(zip_path)
     print(f"Extracted -> ./{dest}/")
 
+    # Best-effort: read extension version for server env hint
+    import json as _json
+    man = os.path.join(dest, "manifest.json")
+    if os.path.exists(man):
+        try:
+            with open(man, encoding="utf-8") as f:
+                ver = _json.load(f).get("version", "")
+            if ver:
+                with open(os.path.join(dest, ".line_chrome_version"), "w") as f:
+                    f.write(ver.strip())
+                print(f"  extension version: {ver}")
+        except Exception as e:
+            print(f"  (version read skipped: {e})")
+
 
 def patch_files():
     files = []
