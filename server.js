@@ -4,8 +4,17 @@ import { Hono } from "hono";
 
 const app = new Hono();
 
-// QR long-poll can take ~150–180s
+// QR long-poll ~150–180s
 const LONG_POLL_MS = 210_000;
+
+// Official Chrome extension identity (keep in sync with patched build)
+const EXT_ID = "ophjlpahpchlmihnnnihgmmeilfjmjjc";
+const EXT_ORIGIN = `chrome-extension://${EXT_ID}`;
+// Match a recent official build; fetch_and_patch should keep this aligned
+const CHROME_VERSION = process.env.LINE_CHROME_VERSION || "3.7.2";
+const UA =
+  process.env.LINE_UA ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const HOSTS = {
   gateway: "https://line-chrome-gw.line-apps.com",
@@ -14,36 +23,84 @@ const HOSTS = {
   uts: "https://uts-front.line-apps.com",
 };
 
+// --- Simple per-IP rate limit (reduce burst / bot-like traffic) ---
+const rateMap = new Map();
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 120; // requests per minute per IP (normal chat is far below this)
+
+function clientIp(c) {
+  return (
+    c.req.header("cf-connecting-ip") ||
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    c.req.header("x-real-ip") ||
+    "unknown"
+  );
+}
+
+function allowRequest(ip) {
+  const now = Date.now();
+  let entry = rateMap.get(ip);
+  if (!entry || now - entry.start > RATE_WINDOW_MS) {
+    entry = { start: now, count: 0 };
+    rateMap.set(ip, entry);
+  }
+  entry.count += 1;
+  // opportunistic cleanup
+  if (rateMap.size > 5000) {
+    for (const [k, v] of rateMap) {
+      if (now - v.start > RATE_WINDOW_MS) rateMap.delete(k);
+    }
+  }
+  return entry.count <= RATE_MAX;
+}
+
 /**
- * Forward to LINE keeping path+query identical (required for X-Hmac).
+ * Forward to LINE with headers closer to the official extension.
+ * Path+query are preserved (required for X-Hmac).
  */
 async function forward(c, base) {
+  const ip = clientIp(c);
+  if (!allowRequest(ip)) {
+    return c.json({ error: "rate_limited", message: "Too many requests" }, 429);
+  }
+
   const incoming = new URL(c.req.url);
   const targetURL = base.replace(/\/$/, "") + incoming.pathname + incoming.search;
 
   const headers = new Headers();
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    const l = k.toLowerCase();
-    if (
-      l === "host" ||
-      l === "connection" ||
-      l === "content-length" ||
-      l === "transfer-encoding" ||
-      l === "accept-encoding"
-    ) {
-      continue;
-    }
-    headers.set(k, v);
+
+  // Pass through client headers that LINE expects
+  const pass = [
+    "content-type",
+    "accept",
+    "accept-language",
+    "x-line-access",
+    "x-line-application",
+    "x-line-channeltoken",
+    "x-line-session-id",
+    "x-lst",
+    "x-hmac",
+    "x-lal",
+    "x-lpv",
+  ];
+  for (const name of pass) {
+    const v = c.req.header(name);
+    if (v) headers.set(name, v);
   }
 
-  headers.set("origin", "chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc");
-  headers.set("referer", "chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc/");
-  if (!headers.has("x-line-chrome-version")) {
-    headers.set("x-line-chrome-version", "3.7.0");
-  }
+  // Normalize identity headers to look like official extension
+  headers.set("origin", EXT_ORIGIN);
+  headers.set("referer", `${EXT_ORIGIN}/`);
+  headers.set("user-agent", UA);
+  headers.set("x-line-chrome-version", CHROME_VERSION);
   if (!headers.has("x-lal")) {
     headers.set("x-lal", "ja_JP");
   }
+  if (!headers.has("accept-language")) {
+    headers.set("accept-language", "ja,en-US;q=0.9,en;q=0.8");
+  }
+  // Do not forward browser cookies from the web origin
+  headers.delete("cookie");
 
   const init = {
     method: c.req.method,
@@ -57,7 +114,10 @@ async function forward(c, base) {
   }
 
   try {
-    console.log(`[proxy] ${c.req.method} ${incoming.pathname} -> ${base}`);
+    // Avoid logging tokens / bodies
+    if (process.env.DEBUG_PROXY === "1") {
+      console.log(`[proxy] ${c.req.method} ${incoming.pathname}`);
+    }
     const response = await fetch(targetURL, init);
 
     const resHeaders = new Headers(response.headers);
@@ -68,6 +128,7 @@ async function forward(c, base) {
     resHeaders.set("Cache-Control", "no-store");
     resHeaders.delete("content-encoding");
     resHeaders.delete("content-length");
+    resHeaders.delete("set-cookie");
 
     return new Response(response.body, {
       status: response.status,
@@ -75,15 +136,19 @@ async function forward(c, base) {
       headers: resHeaders,
     });
   } catch (err) {
-    console.error(`[proxy] FAIL ${targetURL}`, err?.name, err?.message);
     const timeout =
       err?.name === "TimeoutError" ||
       err?.name === "AbortError" ||
-      String(err?.message || "").toLowerCase().includes("abort");
+      String(err?.message || "")
+        .toLowerCase()
+        .includes("abort");
+    if (process.env.DEBUG_PROXY === "1") {
+      console.error(`[proxy] FAIL ${incoming.pathname}`, err?.name);
+    }
     return c.json(
       {
         error: timeout ? "timeout" : "proxy_failed",
-        message: String(err?.message || err),
+        message: timeout ? "Request timed out" : "Upstream error",
       },
       timeout ? 504 : 502
     );
@@ -102,24 +167,15 @@ app.options("/*", (c) =>
   })
 );
 
-// Path-preserving routes (client patched to use same origin)
 app.all("/api/*", (c) => forward(c, HOSTS.gateway));
 app.all("/R4", (c) => forward(c, HOSTS.ci));
 app.all("/R4/*", (c) => forward(c, HOSTS.ci));
-
-// OBS media paths sometimes absolute
 app.all("/r/*", (c) => forward(c, HOSTS.obs));
 app.all("/oa/*", (c) => forward(c, HOSTS.obs));
 
 app.get("/healthz", (c) => c.text("ok"));
 
-// Static files from patched extension (www/)
-app.use(
-  "/*",
-  serveStatic({
-    root: "./www",
-  })
-);
+app.use("/*", serveStatic({ root: "./www" }));
 
 app.notFound((c) => {
   if (/\.\w+$/.test(c.req.path)) return c.text("Not Found", 404);
@@ -127,5 +183,5 @@ app.notFound((c) => {
 });
 
 const port = Number(process.env.PORT) || 3000;
-console.log(`LINE Web client listening on :${port}`);
+console.log(`LINE Web client on :${port} (chrome-version=${CHROME_VERSION})`);
 serve({ fetch: app.fetch, port });
