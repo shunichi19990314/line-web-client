@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Fetch the official LINE Chrome extension and patch it so it can run as a normal website.
+Improved patches for QR code login (long-polling endpoints + more hosts).
 """
 
 import os
@@ -30,8 +31,9 @@ def download_crx():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    resp = requests.get(CRX_URL, headers=headers, allow_redirects=True, timeout=60)
+    resp = requests.get(CRX_URL, headers=headers, allow_redirects=True, timeout=120)
     resp.raise_for_status()
+    print(f"  downloaded {len(resp.content)} bytes")
     return resp.content
 
 
@@ -40,7 +42,6 @@ def extract_crx(crx_data: bytes, dest: str):
     if crx_data[:4] != b"Cr24":
         raise ValueError("Not a valid CRX file")
 
-    # CRX3 header length is at offset 8 (little-endian uint32)
     header_len = struct.unpack("<I", crx_data[8:12])[0]
     zip_start = 12 + header_len
     zip_data = crx_data[zip_start:]
@@ -61,50 +62,44 @@ def extract_crx(crx_data: bytes, dest: str):
 
 
 def patch_files():
-    """Apply the necessary patches so the extension works as a website."""
-    main_js = os.path.join(WWW_DIR, "static", "js", "main.js")
-    ltsm_js = os.path.join(WWW_DIR, "static", "js", "ltsmSandbox.js")
+    """Apply patches so the extension works as a website, including QR login."""
+    candidates = []
+    for root, _, files in os.walk(WWW_DIR):
+        for f in files:
+            if not f.endswith((".js", ".mjs")):
+                continue
+            full = os.path.join(root, f)
+            size = os.path.getsize(full)
+            if size > 50_000 or f in ("main.js", "ltsmSandbox.js", "background.js"):
+                candidates.append(full)
 
-    files_to_patch = []
-    if os.path.exists(main_js):
-        files_to_patch.append(main_js)
-    if os.path.exists(ltsm_js):
-        files_to_patch.append(ltsm_js)
-
-    if not files_to_patch:
-        # Sometimes the path is different depending on version
-        for root, _, files in os.walk(WWW_DIR):
-            for f in files:
-                if f in ("main.js", "ltsmSandbox.js") or f.endswith(".js"):
-                    full = os.path.join(root, f)
-                    # Only patch large JS files that look like the main bundle
-                    if os.path.getsize(full) > 100_000:
-                        files_to_patch.append(full)
-
-    if not files_to_patch:
-        print("Warning: Could not find main.js / ltsmSandbox.js to patch.")
-        print("Please check the extracted structure under ./www/")
+    if not candidates:
+        print("Warning: No JS files found to patch under ./www/")
         return
 
-    # Origin patches (make the code think it is still running inside the extension)
     origin_patterns = [
         (r"window\.origin", r'"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
         (r"window\.location\.origin", r'"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
         (r"(?<![.\w])location\.origin", r'"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
     ]
 
-    # CORS / endpoint patches → route through our proxy
     cors_patterns = [
-        (r'"https://ci\.line-apps\.com/R4"', r"`${location.origin}/_proxy/R4`"),
-        (r"'https://ci\.line-apps\.com/R4'", r"`${location.origin}/_proxy/R4`"),
-        (r'"line-chrome-gw\.line-apps\.com"', r"`${location.host}/_proxy/CHROME_GW`"),
-        (r"'line-chrome-gw\.line-apps\.com'", r"`${location.host}/_proxy/CHROME_GW`"),
         (r'"https://line-chrome-gw\.line-apps\.com"', r"`${location.origin}/_proxy/CHROME_GW`"),
         (r"'https://line-chrome-gw\.line-apps\.com'", r"`${location.origin}/_proxy/CHROME_GW`"),
+        (r'"line-chrome-gw\.line-apps\.com"', r"`${location.host}/_proxy/CHROME_GW`"),
+        (r"'line-chrome-gw\.line-apps\.com'", r"`${location.host}/_proxy/CHROME_GW`"),
+        (r'"https://ci\.line-apps\.com/R4"', r"`${location.origin}/_proxy/R4`"),
+        (r"'https://ci\.line-apps\.com/R4'", r"`${location.origin}/_proxy/R4`"),
+        (r'"https://ci\.line-apps\.com"', r"`${location.origin}/_proxy/CI`"),
+        (r"'https://ci\.line-apps\.com'", r"`${location.origin}/_proxy/CI`"),
+        (r'"https://obs\.line-apps\.com"', r"`${location.origin}/_proxy/OBS`"),
+        (r"'https://obs\.line-apps\.com'", r"`${location.origin}/_proxy/OBS`"),
+        (r'"https://uts-front\.line-apps\.com"', r"`${location.origin}/_proxy/UTS`"),
+        (r"'https://uts-front\.line-apps\.com'", r"`${location.origin}/_proxy/UTS`"),
     ]
 
-    for path in files_to_patch:
-        print(f"Patching {path} ...")
+    for path in candidates:
+        print(f"Patching {path} ({os.path.getsize(path)} bytes) ...")
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
@@ -115,14 +110,14 @@ def patch_files():
         if content != original:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  → patched successfully")
+            print("  \u2192 patched")
         else:
-            print(f"  → no changes (patterns may already be applied or different in this version)")
+            print("  \u2192 no matching patterns")
 
 
 def main():
     print("=" * 60)
-    print("LINE Chrome Extension → Web Client converter")
+    print("LINE Chrome Extension \u2192 Web Client converter")
     print("=" * 60)
 
     crx = download_crx()
@@ -133,8 +128,8 @@ def main():
     print("Done!")
     print("Next steps:")
     print("  1. npm install")
-    print("  2. npm start          # local test → http://localhost:3000")
-    print("  3. Push to GitHub and deploy to Render")
+    print("  2. npm start")
+    print("  3. Open the page and try QR code login")
     print()
 
 
