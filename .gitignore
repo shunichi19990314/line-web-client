@@ -1,0 +1,8 @@
+node_modules/
+www/
+*.zip
+*.crx
+.env
+.DS_Store
+*.log
+.deno/

@@ -1,0 +1,18 @@
+{
+  "name": "line-web",
+  "version": "1.0.0",
+  "description": "Unofficial LINE Web client (patched from official Chrome extension)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "fetch": "python3 scripts/fetch_and_patch.py",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "hono": "^4.6.12",
+    "@hono/node-server": "^1.13.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

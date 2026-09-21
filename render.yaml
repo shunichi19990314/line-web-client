@@ -1,0 +1,13 @@
+# Optional: Render Blueprint (Infrastructure as Code)
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: line-web
+    runtime: node
+    plan: free
+    buildCommand: pip install requests && python3 scripts/fetch_and_patch.py && npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
