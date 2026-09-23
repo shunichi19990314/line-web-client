@@ -1,0 +1,15 @@
+# Help Nixpacks/Railpack provide Python for the build step on Railway
+# https://nixpacks.com/docs/configuration/file
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "python311", "pip"]
+
+[phases.install]
+cmds = [
+  "pip install requests",
+  "python3 scripts/fetch_and_patch.py",
+  "npm install"
+]
+
+[start]
+cmd = "npm start"

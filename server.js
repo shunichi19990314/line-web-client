@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
 
 const app = new Hono();
 
@@ -10,8 +12,21 @@ const LONG_POLL_MS = 210_000;
 // Official Chrome extension identity (keep in sync with patched build)
 const EXT_ID = "ophjlpahpchlmihnnnihgmmeilfjmjjc";
 const EXT_ORIGIN = `chrome-extension://${EXT_ID}`;
-// Match a recent official build; fetch_and_patch should keep this aligned
-const CHROME_VERSION = process.env.LINE_CHROME_VERSION || "3.7.2";
+
+function readChromeVersion() {
+  try {
+    const p = join(process.cwd(), "www", ".line_chrome_version");
+    if (existsSync(p)) {
+      const v = readFileSync(p, "utf8").trim();
+      if (v) return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  return process.env.LINE_CHROME_VERSION || "3.7.2";
+}
+
+const CHROME_VERSION = readChromeVersion();
 const UA =
   process.env.LINE_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -182,6 +197,10 @@ app.notFound((c) => {
   return c.redirect("/?fallbackBy=" + encodeURIComponent(c.req.path));
 });
 
+// Railway / Render / Docker: must listen on 0.0.0.0 and process.env.PORT
 const port = Number(process.env.PORT) || 3000;
-console.log(`LINE Web client on :${port} (chrome-version=${CHROME_VERSION})`);
-serve({ fetch: app.fetch, port });
+const hostname = process.env.HOST || "0.0.0.0";
+console.log(
+  `LINE Web client on http://${hostname}:${port} (chrome-version=${CHROME_VERSION})`
+);
+serve({ fetch: app.fetch, port, hostname });

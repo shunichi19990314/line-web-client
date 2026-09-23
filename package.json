@@ -1,11 +1,13 @@
 {
   "name": "line-web",
-  "version": "1.0.0",
-  "description": "Unofficial LINE Web client (patched from official Chrome extension)",
+  "version": "1.1.0",
+  "description": "Unofficial LINE Web client (patched from official Chrome extension) — Render & Railway",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "fetch": "python3 scripts/fetch_and_patch.py",
+    "build": "python3 scripts/fetch_and_patch.py",
+    "postinstall": "node -e \"try{require('fs').accessSync('www')}catch{console.log('Run: npm run fetch (or python3 scripts/fetch_and_patch.py)')}\"",
     "dev": "node --watch server.js"
   },
   "dependencies": {
