@@ -73,6 +73,12 @@ npm start
 
 5. デプロイ完了後、`https://あなたのサービス.up.railway.app` を開く
 
+### 再デプロイ（パッチ修正後）
+
+GitHub の `main` が更新されたら Railway が自動で再ビルドします。  
+手動の場合は Dashboard で **Redeploy**（可能なら **Clear build cache** 相当）を実行してください。  
+`www/` はビルド時に毎回作り直すため、パッチ修正が反映されます。
+
 ### Railway での注意
 
 - サーバーは `0.0.0.0` と `process.env.PORT` で待受（Railway 必須）
@@ -117,8 +123,9 @@ Railway のサービス設定で **Dockerfile** を使うと、Node + Python が
 ## 仕組みの概要
 
 1. 公式 LINE Chrome 拡張機能（ID: `ophjlpahpchlmihnnnihgmmeilfjmjjc`）をダウンロード
-2. 中の `main.js` などをパッチ
+2. 中の `main.js` / `ltsmSandbox.js` などをパッチ
    - `location.origin` などを拡張機能のオリジンに偽装
+   - `https://ci.line-apps.com/R4` → `` `${location.origin}/R4` ``（同一オリジン経由）
    - API ホストを same-origin にし、path は `/api/...` のまま維持（X-Hmac 用）
 3. Node.js (Hono) で静的ファイル配信 + プロキシサーバーを起動
 
@@ -126,6 +133,23 @@ Railway のサービス設定で **Dockerfile** を使うと、Node + Python が
 
 - `/api/*` → `https://line-chrome-gw.line-apps.com`
 - `/R4` → `https://ci.line-apps.com`
+
+---
+
+## QR ログインで「一時的にログインできません」と出る場合
+
+よくある原因:
+
+1. **R4 がパッチされていない**（ブラウザが `ci.line-apps.com` に直接アクセス → CORS/失敗）
+2. ビルド時のパッチが古い（**Redeploy** で `fetch_and_patch.py` を再実行）
+3. データセンター IP からのログインが LINE 側で拒否されている
+4. 公式拡張と違うバージョン・ヘッダ不整合
+
+確認方法（ブラウザの開発者ツール → Network）:
+
+- `createSession` / `createQrCode` が **自ドメインの `/api/...`** に向いているか
+- **`/R4?type=Chrome_OS...` が自ドメイン** に向いているか（`ci.line-apps.com` 直ではないこと）
+- `checkQrCodeVerified` が長時間 Pending のあと、スキャン後にエラーになっていないか
 
 ---
 

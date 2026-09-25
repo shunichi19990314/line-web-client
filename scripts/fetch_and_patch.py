@@ -4,8 +4,9 @@ Download official LINE Chrome extension and patch it for web deployment.
 
 Critical for QR login:
   - HMAC signs (path + body). Path must stay /api/... not /_proxy/...
-  - Therefore we rewrite hosts to location.origin (same-origin), and the
-    Node server proxies /api/* and /R4 to the real LINE hosts.
+  - R4 config must go through same-origin /R4 (not direct ci.line-apps.com)
+  - Therefore we rewrite hosts to location.origin, and the Node server
+    proxies /api/* and /R4 to the real LINE hosts.
 """
 
 import os
@@ -57,6 +58,7 @@ def extract_crx(crx_data: bytes, dest: str):
 
     # Best-effort: read extension version for server env hint
     import json as _json
+
     man = os.path.join(dest, "manifest.json")
     if os.path.exists(man):
         try:
@@ -77,53 +79,101 @@ def patch_files():
             if not name.endswith((".js", ".mjs", ".html")):
                 continue
             path = os.path.join(root, name)
-            if name in ("main.js", "ltsmSandbox.js", "ltsmSandbox.html", "background.js") or os.path.getsize(path) > 40_000:
+            if name in (
+                "main.js",
+                "ltsmSandbox.js",
+                "ltsmSandbox.html",
+                "background.js",
+            ) or os.path.getsize(path) > 40_000:
                 files.append(path)
 
     if not files:
         print("WARNING: no JS to patch")
         return
 
+    # 1) Origin spoof for extension postMessage / origin checks
+    #    Do this BEFORE inserting ${location.origin} templates.
     origin_repls = [
         (r"window\.origin", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
         (r"window\.location\.origin", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
-        (r"(?<![.\w])location\.origin", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
+        # Avoid replacing location.origin inside strings we already rewrote
+        (r"(?<![.\w$`])location\.origin(?!\s*\})", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
     ]
 
+    # 2) R4 full URLs (MUST include /R4 — bare host match alone is not enough)
+    #    Client config looks like: "https://ci.line-apps.com/R4"
+    r4_hosts = [
+        "ci.line-apps.com",
+        "cix.line-apps.com",
+        "ci-beta.line-apps-beta.com",
+        "ci-beta2.line-apps-beta.com",
+        "ci-beta3.line-apps-beta.com",
+        "ci-rc.line-apps-rc.com",
+        "ci-rc2.line-apps-rc.com",
+        "ci-rc3.line-apps-rc.com",
+        "cix-beta.line-apps-beta.com",
+        "cix-beta2.line-apps-beta.com",
+        "cix-beta3.line-apps-beta.com",
+        "cix-rc.line-apps-rc.com",
+        "cix-rc2.line-apps-rc.com",
+        "cix-rc3.line-apps-rc.com",
+    ]
+    r4_repls = []
+    for h in r4_hosts:
+        r4_repls.append(
+            (re.escape(f'"https://{h}/R4"'), "`${location.origin}/R4`")
+        )
+        r4_repls.append(
+            (re.escape(f"'https://{h}/R4'"), "`${location.origin}/R4`")
+        )
+
+    # 3) API / media hosts → same-origin (path stays /api/... for HMAC)
     host_repls = [
         (r'"https://line-chrome-gw\.line-apps\.com"', "`${location.origin}`"),
         (r"'https://line-chrome-gw\.line-apps\.com'", "`${location.origin}`"),
-        (r'"https://ci\.line-apps\.com"', "`${location.origin}`"),
-        (r"'https://ci\.line-apps\.com'", "`${location.origin}`"),
         (r'"https://obs\.line-apps\.com"', "`${location.origin}`"),
         (r"'https://obs\.line-apps\.com'", "`${location.origin}`"),
         (r'"https://uts-front\.line-apps\.com"', "`${location.origin}`"),
         (r"'https://uts-front\.line-apps\.com'", "`${location.origin}`"),
-        (r'"line-chrome-gw\.line-apps\.com"', "`${location.host}`"),
-        (r"'line-chrome-gw\.line-apps\.com'", "`${location.host}`"),
-        (r'"ci\.line-apps\.com"', "`${location.host}`"),
-        (r"'ci\.line-apps\.com'", "`${location.host}`"),
-        (r'"obs\.line-apps\.com"', "`${location.host}`"),
-        (r"'obs\.line-apps\.com'", "`${location.host}`"),
+        (r'"line-chrome-gw\.line-apps\.com"', "location.host"),
+        (r"'line-chrome-gw\.line-apps\.com'", "location.host"),
+        (r'"obs\.line-apps\.com"', "location.host"),
+        (r"'obs\.line-apps\.com'", "location.host"),
     ]
 
     for path in files:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         original = content
-        for pat, repl in origin_repls + host_repls:
+
+        # Order: origin spoof first, then R4 full URLs, then other hosts
+        for pat, repl in origin_repls:
             content = re.sub(pat, repl, content)
+        for pat, repl in r4_repls:
+            content = re.sub(pat, repl, content)
+        for pat, repl in host_repls:
+            content = re.sub(pat, repl, content)
+
+        # Safety: any remaining bare https://ci.line-apps.com without path
+        content = re.sub(
+            r'"https://ci\.line-apps\.com"(?!/)',
+            "`${location.origin}`",
+            content,
+        )
+
         if content != original:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  patched {path}")
+            # Report R4 fix specifically
+            r4_left = len(re.findall(r"https://ci(?:x)?(?:-[a-z0-9]+)?\.line-apps(?:-[a-z]+)?\.com/R4", content))
+            print(f"  patched {path} (remaining R4 absolute URLs: {r4_left})")
         else:
             print(f"  skip    {path}")
 
 
 def main():
     print("=" * 60)
-    print("LINE Chrome \u2192 Web (HMAC-safe path-preserving proxy)")
+    print("LINE Chrome → Web (HMAC-safe + R4 same-origin proxy)")
     print("=" * 60)
     crx = download_crx()
     extract_crx(crx, WWW_DIR)
