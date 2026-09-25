@@ -5,8 +5,8 @@ Download official LINE Chrome extension and patch it for web deployment.
 Critical for QR login:
   - HMAC signs (path + body). Path must stay /api/... not /_proxy/...
   - R4 config must go through same-origin /R4 (not direct ci.line-apps.com)
-  - Therefore we rewrite hosts to location.origin, and the Node server
-    proxies /api/* and /R4 to the real LINE hosts.
+  - After qrCodeLoginV2, access token must be set BEFORE processAfterLogin's getProfile
+  - LTSM sandbox trmInit must accept web origin (not only chrome-extension://)
 """
 
 import os
@@ -56,7 +56,6 @@ def extract_crx(crx_data: bytes, dest: str):
     os.remove(zip_path)
     print(f"Extracted -> ./{dest}/")
 
-    # Best-effort: read extension version for server env hint
     import json as _json
 
     man = os.path.join(dest, "manifest.json")
@@ -70,6 +69,43 @@ def extract_crx(crx_data: bytes, dest: str):
                 print(f"  extension version: {ver}")
         except Exception as e:
             print(f"  (version read skipped: {e})")
+
+
+def patch_post_login_token(content: str) -> tuple[str, bool]:
+    """Set access token in memory BEFORE processAfterLogin calls getProfile."""
+    old = (
+        "_T=async(e,t)=>{try{const{dispatch:n}=IA;"
+        "n(Eg.setLoginState(md.LOG_IN_PROGRESSING));"
+        "const r=await pj"
+    )
+    new = (
+        "_T=async(e,t)=>{try{const{dispatch:n}=IA;"
+        "e&&rT().setTokenV3IssueResult(e);"
+        "n(Eg.setLoginState(md.LOG_IN_PROGRESSING));"
+        "const r=await pj"
+    )
+    if old not in content:
+        print("  WARN: processAfterLogin token patch pattern not found")
+        return content, False
+    return content.replace(old, new, 1), True
+
+
+def patch_trm_init_origin(content: str) -> tuple[str, int]:
+    """Allow trmInit postMessage from web origin (real origin cannot be spoofed)."""
+    old = (
+        'e.origin==="chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'
+        '&&"trmInit"===e.data'
+    )
+    # Accept extension origin OR same web page origin
+    new = (
+        '(e.origin===location.origin||e.origin==='
+        '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc")'
+        '&&"trmInit"===e.data'
+    )
+    count = content.count(old)
+    if count:
+        content = content.replace(old, new)
+    return content, count
 
 
 def patch_files():
@@ -91,17 +127,12 @@ def patch_files():
         print("WARNING: no JS to patch")
         return
 
-    # 1) Origin spoof for extension postMessage / origin checks
-    #    Do this BEFORE inserting ${location.origin} templates.
     origin_repls = [
         (r"window\.origin", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
         (r"window\.location\.origin", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
-        # Avoid replacing location.origin inside strings we already rewrote
         (r"(?<![.\w$`])location\.origin(?!\s*\})", '"chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc"'),
     ]
 
-    # 2) R4 full URLs (MUST include /R4 — bare host match alone is not enough)
-    #    Client config looks like: "https://ci.line-apps.com/R4"
     r4_hosts = [
         "ci.line-apps.com",
         "cix.line-apps.com",
@@ -120,14 +151,9 @@ def patch_files():
     ]
     r4_repls = []
     for h in r4_hosts:
-        r4_repls.append(
-            (re.escape(f'"https://{h}/R4"'), "`${location.origin}/R4`")
-        )
-        r4_repls.append(
-            (re.escape(f"'https://{h}/R4'"), "`${location.origin}/R4`")
-        )
+        r4_repls.append((re.escape(f'"https://{h}/R4"'), "`${location.origin}/R4`"))
+        r4_repls.append((re.escape(f"'https://{h}/R4'"), "`${location.origin}/R4`"))
 
-    # 3) API / media hosts → same-origin (path stays /api/... for HMAC)
     host_repls = [
         (r'"https://line-chrome-gw\.line-apps\.com"', "`${location.origin}`"),
         (r"'https://line-chrome-gw\.line-apps\.com'", "`${location.origin}`"),
@@ -145,8 +171,8 @@ def patch_files():
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         original = content
+        notes = []
 
-        # Order: origin spoof first, then R4 full URLs, then other hosts
         for pat, repl in origin_repls:
             content = re.sub(pat, repl, content)
         for pat, repl in r4_repls:
@@ -154,26 +180,41 @@ def patch_files():
         for pat, repl in host_repls:
             content = re.sub(pat, repl, content)
 
-        # Safety: any remaining bare https://ci.line-apps.com without path
         content = re.sub(
             r'"https://ci\.line-apps\.com"(?!/)',
             "`${location.origin}`",
             content,
         )
 
+        # Web-specific behavioral fixes (mainly main.js)
+        if path.endswith("main.js") or path.endswith("ltsmSandbox.js"):
+            content, trm_n = patch_trm_init_origin(content)
+            if trm_n:
+                notes.append(f"trmInit-origin x{trm_n}")
+
+        if path.endswith("main.js"):
+            content, ok = patch_post_login_token(content)
+            if ok:
+                notes.append("setToken-before-getProfile")
+
         if content != original:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
-            # Report R4 fix specifically
-            r4_left = len(re.findall(r"https://ci(?:x)?(?:-[a-z0-9]+)?\.line-apps(?:-[a-z]+)?\.com/R4", content))
-            print(f"  patched {path} (remaining R4 absolute URLs: {r4_left})")
+            r4_left = len(
+                re.findall(
+                    r"https://ci(?:x)?(?:-[a-z0-9]+)?\.line-apps(?:-[a-z]+)?\.com/R4",
+                    content,
+                )
+            )
+            extra = (", " + ", ".join(notes)) if notes else ""
+            print(f"  patched {path} (R4 left={r4_left}{extra})")
         else:
             print(f"  skip    {path}")
 
 
 def main():
     print("=" * 60)
-    print("LINE Chrome → Web (HMAC-safe + R4 same-origin proxy)")
+    print("LINE Chrome → Web (HMAC + R4 + post-login token fix)")
     print("=" * 60)
     crx = download_crx()
     extract_crx(crx, WWW_DIR)
